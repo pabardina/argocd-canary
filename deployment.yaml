@@ -1,37 +1,105 @@
 ---
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
 metadata:
-  name: colorapi
+  name: demo
   labels:
-    app: colorapi
+    app: demo
 spec:
-  replicas: 5
+  strategy:
+    canary:
+      analysis:
+        templates:
+        - templateName: success-rate
+        startingStep: 2
+        args:
+        - name: service-name
+          value: demo-canary.default.svc.cluster.local
+      steps:
+      - setWeight: 20
+      - pause:
+          duration: "1m"
+      - setWeight: 50
+      - pause:
+          duration: "2m"
+      canaryService: demo-canary
+      stableService: demo
+      trafficRouting:
+        istio:
+           virtualService: 
+            name: istio-vs
+            routes:
+            - primary # At least one route is required
+  replicas: 4
   revisionHistoryLimit: 2
   selector:
     matchLabels:
-      app: colorapi
+      app: demo
+      version: blue
   template:
     metadata:
       labels:
-        app: colorapi
+        app: demo
+        version: blue
     spec:
       containers:
-      - name: colorapi
-        image: particule/simplecolorapi:1.0
+      - name: demo
+        image: argoproj/rollouts-demo:blue
         imagePullPolicy: Always
         ports:
         - name: web
-          containerPort: 5000
+          containerPort: 8080
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "140m"
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: colorapi
+  name: demo
 spec:
   ports:
   - port: 80
-    targetPort: 5000
+    targetPort: 8080
   selector:
-    app: colorapi
-  type: LoadBalancer
+    app: demo
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-canary
+spec:
+  ports:
+  - port: 80
+    targetPort: 8080
+  selector:
+    app: demo
+  type: ClusterIP
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: success-rate
+spec:
+  args:
+  - name: service-name
+  metrics:
+  - name: success-rate
+    successCondition: result[0] >= 0.95
+    interval: 30s
+    failureLimit: 1
+    provider:
+      prometheus:
+        address: http://prometheus.istio-system.svc.cluster.local:9090
+        query: |
+          sum(irate(
+            istio_requests_total{reporter="source",destination_service=~"{{args.service-name}}",response_code!~"5.*"}[1m]
+          )) / 
+          sum(irate(
+            istio_requests_total{reporter="source",destination_service=~"{{args.service-name}}"}[1m]
+          ))
